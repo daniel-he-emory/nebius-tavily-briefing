@@ -7,13 +7,29 @@ import sys
 
 from dotenv import load_dotenv
 
-NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
-# NVIDIA Nemotron model, verified against this account's live model list
-# (client.models.list()) — required for the Nebius x NVIDIA hackathon rule
-# that submissions use at least one NVIDIA open source model. It reasons
-# internally before answering, so give it enough max_tokens headroom.
-# Override with --model or NEBIUS_MODEL if needed.
-FALLBACK_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
+PROVIDERS = {
+    "nebius": {
+        "base_url": "https://api.tokenfactory.nebius.com/v1/",
+        "api_key_env": "NEBIUS_API_KEY",
+        "model_env": "NEBIUS_MODEL",
+        # NVIDIA Nemotron model, verified against this account's live model
+        # list (client.models.list()) — required for the Nebius x NVIDIA
+        # hackathon rule that submissions use at least one NVIDIA open
+        # source model. It reasons internally before answering, hence the
+        # generous max_tokens budget in generate_briefing().
+        "fallback_model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B",
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "model_env": "OPENROUTER_MODEL",
+        # NOTE: using this provider does NOT satisfy the Nebius x NVIDIA
+        # hackathon's eligibility rule (submissions must run on Nebius
+        # Token Factory/AI Cloud with an NVIDIA model) — use --provider
+        # nebius for anything submitted to that hackathon.
+        "fallback_model": "stealth/space-bunny-alpha",
+    },
+}
 
 MAX_SOURCE_CHARS = 5000
 
@@ -33,10 +49,18 @@ def parse_args():
     parser.add_argument("topic", nargs="?", help="Topic or question to research")
     parser.add_argument("--max-results", type=int, default=5, help="Tavily search results to fetch (default: 5)")
     parser.add_argument("--top-n", type=int, default=3, help="Top results to extract full text from (default: 3)")
-    parser.add_argument("--model", default=os.environ.get("NEBIUS_MODEL", FALLBACK_MODEL), help="Nebius Token Factory model id")
+    parser.add_argument(
+        "--provider", choices=list(PROVIDERS), default="nebius",
+        help="LLM provider for synthesis (default: nebius). Only 'nebius' satisfies the "
+             "Nebius x NVIDIA hackathon eligibility rule.",
+    )
+    parser.add_argument("--model", default=None, help="Override the provider's default model id")
     args = parser.parse_args()
     if args.top_n > args.max_results:
         args.top_n = args.max_results
+    if args.model is None:
+        provider = PROVIDERS[args.provider]
+        args.model = os.environ.get(provider["model_env"], provider["fallback_model"])
     return args
 
 
@@ -113,7 +137,7 @@ def generate_briefing(openai_client, model, topic, sources):
             max_tokens=4000,
         )
     except Exception as e:
-        print(f"Error: Nebius Token Factory call failed: {e}", file=sys.stderr)
+        print(f"Error: LLM call failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     return response.choices[0].message.content
@@ -128,14 +152,20 @@ def main():
         print("Error: no topic provided.", file=sys.stderr)
         sys.exit(1)
 
+    provider = PROVIDERS[args.provider]
     tavily_key = require_env("TAVILY_API_KEY")
-    nebius_key = require_env("NEBIUS_API_KEY")
+    llm_key = require_env(provider["api_key_env"])
+
+    if args.provider == "openrouter":
+        print("Note: --provider openrouter does not satisfy the Nebius x NVIDIA "
+              "hackathon's eligibility rule (requires Token Factory/AI Cloud + an "
+              "NVIDIA model). Use --provider nebius for that submission.", file=sys.stderr)
 
     from tavily import TavilyClient
     from openai import OpenAI
 
     tavily_client = TavilyClient(api_key=tavily_key)
-    openai_client = OpenAI(base_url=NEBIUS_BASE_URL, api_key=nebius_key)
+    openai_client = OpenAI(base_url=provider["base_url"], api_key=llm_key)
 
     results = search_sources(tavily_client, topic, args.max_results)
     sources = extract_sources(tavily_client, results, args.top_n)
