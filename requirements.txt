@@ -1,3 +1,5 @@
 tavily-python
 openai
 python-dotenv
+gradio
+huggingface_hub<0.26  # gradio 4.44.1 imports HfFolder, removed in newer huggingface_hub releases

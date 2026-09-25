@@ -6,6 +6,8 @@ import os
 import sys
 
 from dotenv import load_dotenv
+from openai import OpenAI
+from tavily import TavilyClient
 
 PROVIDERS = {
     "nebius": {
@@ -44,6 +46,10 @@ numbered source ids. If sources conflict, note the disagreement. If the sources 
 cover something, say so rather than inventing information."""
 
 
+class BriefingError(Exception):
+    """Raised when briefing generation cannot be completed."""
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate a sourced briefing on a topic.")
     parser.add_argument("topic", nargs="?", help="Topic or question to research")
@@ -67,8 +73,9 @@ def parse_args():
 def require_env(name):
     value = os.environ.get(name)
     if not value:
-        print(f"Error: {name} is not set. Copy .env.example to .env and fill in your key.", file=sys.stderr)
-        sys.exit(1)
+        raise BriefingError(
+            f"Error: {name} is not set. Copy .env.example to .env and fill in your key."
+        )
     return value
 
 
@@ -77,13 +84,11 @@ def search_sources(tavily_client, topic, max_results):
     try:
         response = tavily_client.search(topic, max_results=max_results)
     except Exception as e:
-        print(f"Error: Tavily search failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise BriefingError(f"Error: Tavily search failed: {e}") from e
 
     results = response.get("results", [])
     if not results:
-        print("No search results found for this topic. Try rephrasing it.", file=sys.stderr)
-        sys.exit(1)
+        raise BriefingError("No search results found for this topic. Try rephrasing it.")
     return results
 
 
@@ -108,8 +113,7 @@ def extract_sources(tavily_client, results, top_n):
         sources.append({"url": url, "content": content})
 
     if not sources:
-        print("Error: could not extract content from any source. Aborting.", file=sys.stderr)
-        sys.exit(1)
+        raise BriefingError("Error: could not extract content from any source. Aborting.")
 
     print(f"Extracted {len(sources)} of {len(urls)} requested sources.", file=sys.stderr)
     return sources
@@ -137,8 +141,7 @@ def generate_briefing(openai_client, model, topic, sources):
             max_tokens=4000,
         )
     except Exception as e:
-        print(f"Error: LLM call failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise BriefingError(f"Error: LLM call failed: {e}") from e
 
     return response.choices[0].message.content
 
@@ -153,23 +156,24 @@ def main():
         sys.exit(1)
 
     provider = PROVIDERS[args.provider]
-    tavily_key = require_env("TAVILY_API_KEY")
-    llm_key = require_env(provider["api_key_env"])
+    try:
+        tavily_key = require_env("TAVILY_API_KEY")
+        llm_key = require_env(provider["api_key_env"])
 
-    if args.provider == "openrouter":
-        print("Note: --provider openrouter does not satisfy the Nebius x NVIDIA "
-              "hackathon's eligibility rule (requires Token Factory/AI Cloud + an "
-              "NVIDIA model). Use --provider nebius for that submission.", file=sys.stderr)
+        if args.provider == "openrouter":
+            print("Note: --provider openrouter does not satisfy the Nebius x NVIDIA "
+                  "hackathon's eligibility rule (requires Token Factory/AI Cloud + an "
+                  "NVIDIA model). Use --provider nebius for that submission.", file=sys.stderr)
 
-    from tavily import TavilyClient
-    from openai import OpenAI
+        tavily_client = TavilyClient(api_key=tavily_key)
+        openai_client = OpenAI(base_url=provider["base_url"], api_key=llm_key)
 
-    tavily_client = TavilyClient(api_key=tavily_key)
-    openai_client = OpenAI(base_url=provider["base_url"], api_key=llm_key)
-
-    results = search_sources(tavily_client, topic, args.max_results)
-    sources = extract_sources(tavily_client, results, args.top_n)
-    briefing = generate_briefing(openai_client, args.model, topic, sources)
+        results = search_sources(tavily_client, topic, args.max_results)
+        sources = extract_sources(tavily_client, results, args.top_n)
+        briefing = generate_briefing(openai_client, args.model, topic, sources)
+    except BriefingError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
     print(f"\n=== Briefing: {topic} ===\n")
     print(briefing)
